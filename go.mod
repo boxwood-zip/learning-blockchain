@@ -4,7 +4,9 @@ go 1.23.6
 
 replace github.com/boxwood-zip/learning-blockchain/hdwallet/01-mnemonic/mnemonic => ./hdwallet/01-mnemonic/mnemonic
 
-replace github.com/boxwood-zip/learning-blockchain/hdwallet/02-key_derivation/key => ./hewallet/02-key_derivation/key
+replace github.com/boxwood-zip/learning-blockchain/hdwallet/02-key_derivation/key => ./hdwallet/02-key_derivation/key
+
+replace github.com/boxwood-zip/learning-blockchain/hdwallet/04-transaction/ethtx => ./hdwallet/04-transaction/ethtx
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
