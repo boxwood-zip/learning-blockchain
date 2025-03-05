@@ -1,4 +1,4 @@
-package ethereum
+package ethtx
 
 import (
 	"context"
@@ -12,58 +12,62 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/ethereum/go-ethereum/rpc"
 )
 
-// LegacyTransaction structure
-type LegacyTransaction struct {
+// EIP1559Transaction structure
+type EIP1559Transaction struct {
 	client       *ethclient.Client
 	privateKey   *ecdsa.PrivateKey
 	to           common.Address
 	value        *big.Int
 	data         []byte
 	nonce        uint64
-	gasPrice     *big.Int
+	maxPriorityFeePerGas *big.Int
+	maxFeePerGas *big.Int
 	gasLimit     uint64
 	chainID      *big.Int
 	txHash       common.Hash
+	v, r, s      *big.Int
 }
 
 // Return the transaction attributes
-func (tx *LegacyTransaction) To() common.Address {
+func (tx *EIP1559Transaction) To() common.Address {
 	return tx.to
 }
-func (tx *LegacyTransaction) Value() *big.Int {
+func (tx *EIP1559Transaction) Value() *big.Int {
 	return tx.value
 }
-func (tx *LegacyTransaction) Data() []byte {
+func (tx *EIP1559Transaction) Data() []byte {
 	return tx.data
 }
-func (tx *LegacyTransaction) Nonce() uint64 {
+func (tx *EIP1559Transaction) Nonce() uint64 {
 	return tx.nonce
 }
-func (tx *LegacyTransaction) GasPrice() *big.Int {
-	return tx.gasPrice
+func (tx *EIP1559Transaction) MaxPriorityFeePerGas() *big.Int {
+	return tx.maxPriorityFeePerGas
 }
-func (tx *LegacyTransaction) GasLimit() uint64 {
+func (tx *EIP1559Transaction) MaxFeePerGas() *big.Int {
+	return tx.maxFeePerGas
+}
+func (tx *EIP1559Transaction) GasLimit() uint64 {
 	return tx.gasLimit
 }
-func (tx *LegacyTransaction) ChainID() *big.Int {
+func (tx *EIP1559Transaction) ChainID() *big.Int {
 	return tx.chainID
 }
-func (tx *LegacyTransaction) Hash() common.Hash {
+func (tx *EIP1559Transaction) Hash() common.Hash {
 	return tx.txHash
 }
 
-// NewLegacyTransaction creates a new Legacy transaction 
-func NewLegacyTransaction(
+// NewEIP1559Transaction creates a new EIP-1559 transaction
+func NewEIP1559Transaction(
 	client *ethclient.Client,
 	privateKeyHex string,
 	toAddress string,
 	value *big.Int,
 	data []byte,
 	gasLimit uint64,
-) (*LegacyTransaction, error) {
+) (*EIP1559Transaction, error) {
 	// Private key
 	privateKey, err := crypto.HexToECDSA(privateKeyHex)
 	if err != nil {
@@ -87,10 +91,21 @@ func NewLegacyTransaction(
 	}
 
 	// Estimate gas price
-	gasPrice, err := client.SuggestGasPrice(context.Background())
+	gasTipCap, err := client.SuggestGasTipCap(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("error getting gas price: %v", err)
+		return nil, fmt.Errorf("error getting gas tip cap: %w", err)
 	}
+	
+	header, err := client.HeaderByNumber(context.Background(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("error getting baseFee: %w", err)
+	}
+	
+	// 2 * baseFee + gasTipCap
+	maxFeePerGas := new(big.Int).Add(
+		new(big.Int).Mul(header.BaseFee, big.NewInt(2)),
+		gasTipCap,
+	)
 
 	// Chain ID
 	chainID, err := client.NetworkID(context.Background())
@@ -98,33 +113,36 @@ func NewLegacyTransaction(
 		return nil, fmt.Errorf("error getting chain id: %v", err)
 	}
 
-	return &LegacyTransaction{
-		client:     client,
-		privateKey: privateKey,
-		to:         to,
-		value:      value,
-		data:       data,
-		nonce:      nonce,
-		gasPrice:   gasPrice,
-		gasLimit:   gasLimit,
-		chainID:    chainID,
+	return &EIP1559Transaction{
+		client:       client,
+		privateKey:   privateKey,
+		to:           to,
+		value:        value,
+		data:         data,
+		nonce:        nonce,
+		maxPriorityFeePerGas: gasTipCap,
+		maxFeePerGas: maxFeePerGas,
+		gasLimit:     gasLimit,
+		chainID:      chainID,
 	}, nil
 }
 
 // Send broadcasts the transaction
-func (tx *LegacyTransaction) Send(ctx context.Context) (string, error) {
-	// Create legacy transaction
-	rawTx := types.NewTransaction(
-		tx.nonce,
-		tx.to,
-		tx.value,
-		tx.gasLimit,
-		tx.gasPrice,
-		tx.data,
-	)
+func (tx *EIP1559Transaction) Send(ctx context.Context) (string, error) {
+	// Create EIP-1559 transaction
+	rawTx := types.NewTx(&types.DynamicFeeTx{
+		ChainID:   tx.chainID,
+		Nonce:     tx.nonce,
+		GasTipCap: tx.maxPriorityFeePerGas,
+		GasFeeCap: tx.maxFeePerGas,
+		Gas:       tx.gasLimit,
+		To:        &tx.to,
+		Value:     tx.value,
+		Data:      tx.data,
+	})
 
 	// Sign transaction
-	signedTx, err := types.SignTx(rawTx, types.NewEIP155Signer(tx.chainID), tx.privateKey)
+	signedTx, err := types.SignTx(rawTx, types.LatestSignerForChainID(tx.chainID), tx.privateKey)
 	if err != nil {
 		return "", fmt.Errorf("transaction signing error: %w", err)
 	}
@@ -134,24 +152,18 @@ func (tx *LegacyTransaction) Send(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("transaction sending error: %w", err)
 	}
+	tx.txHash = signedTx.Hash()
+	tx.v, tx.r, tx.s = signedTx.RawSignatureValues()
 
 	fmt.Println("transaction has been sent.")
-	txAsJson, err := json.MarshalIndent(signedTx, "", "  ")
+	txAsJson, _ := json.MarshalIndent(signedTx, "", "  ")
 	fmt.Println(string(txAsJson))
 	
 	return signedTx.Hash().Hex(), nil
 }
 
-func (tx *LegacyTransaction) SendRaw(client *rpc.Client, ctx context.Context, rawTxHex string) (string, error) {
-	err := client.CallContext(ctx, &tx.txHash, "eth_sendRawTransaction", rawTxHex)
-	if err != nil {
-		return "", fmt.Errorf("transaction transfer failed: %v", err)
-	}
-	return tx.txHash.Hex(), nil
-}
-
 // Confirm waits until the transaction receives the specified number of block confirmations
-func (tx *LegacyTransaction) Confirm(ctx context.Context, blockConfirmations uint64) (*types.Receipt, error) {
+func (tx *EIP1559Transaction) Confirm(ctx context.Context, blockConfirmations uint64) (*types.Receipt, error) {
 	if tx.txHash == (common.Hash{}) {
 		return nil, fmt.Errorf("Must send the transaction first")
 	}
@@ -195,10 +207,7 @@ func (tx *LegacyTransaction) Confirm(ctx context.Context, blockConfirmations uin
 				if header.Number.Cmp(targetBlock) >= 0 {
 					confirmations := new(big.Int).Sub(header.Number, receipt.BlockNumber).Uint64()
 					fmt.Printf("Transaction has received %d confirmations.\n", confirmations)
-					receiptAsJson, err := json.MarshalIndent(receipt, "", "  ")
-					if err !=nil {
-						return nil, fmt.Errorf("Failed to convert receipt to json type")
-					}
+					receiptAsJson, _ := json.MarshalIndent(receipt, "", "  ")
 					fmt.Println(string(receiptAsJson))
 					
 					return receipt, nil
